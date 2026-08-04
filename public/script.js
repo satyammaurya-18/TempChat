@@ -1,5 +1,7 @@
-// script.js
+
 // UI + Socket.IO only. All cipher logic lives in encryption.js.
+let hasLeftRoom = false;
+
 
 // Socket.IO Connection
 const socket = io();
