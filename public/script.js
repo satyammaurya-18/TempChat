@@ -63,6 +63,20 @@ if (window.location.pathname === '/chat.html') {
     const roomMappingRaw = sessionStorage.getItem('roomMapping');
     const username = sessionStorage.getItem('username');
 
+    document.getElementById("leave-btn").addEventListener("click", leaveRoom);
+
+    function leaveRoom() {
+
+        if (hasLeftRoom) return;
+        hasLeftRoom = true;
+    
+        socket.emit("leave-room", { roomCode });
+    
+        sessionStorage.clear();
+    
+        window.location.href = "/";
+    }
+
     if (!roomCode || !roomPassword || !roomMappingRaw) {
         window.location.href = '/';
     }
