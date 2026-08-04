@@ -75,8 +75,9 @@ if (window.location.pathname === '/chat.html') {
         window.location.href = '/';
     }
 
-    document.getElementById('room-display').textContent = `Room: ${roomCode}`;
-    document.getElementById('user-display').textContent = `Logged in as: ${username}`;
+    document.getElementById('room-display').textContent = `${roomCode}`;
+    document.getElementById('password-display').textContent = `${roomPassword}`;
+    document.getElementById('user-display').textContent = `${username}`;
 
     // Join socket room
     socket.emit('join-room', { roomCode, username });
