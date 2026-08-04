@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
@@ -13,6 +14,59 @@ const io = new Server(server, {
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+
+// --- Per-room encryption mapping ---
+
+// The complete codebook: 83 unique codes (one per character).
+const CODES = [
+    '{A7K2}', '{M4P9}', '{Q8D1}', '{R2X5}', '{L9H3}', '{T6N8}', '{B5W7}', '{C1J4}',
+    '{F8V2}', '{Y3K6}', '{P7A9}', '{E4R1}', '{H2M5}', '{N8Q3}', '{G6T4}', '{U1Z7}',
+    '{D5L8}', '{X9B2}', '{S3F6}', '{J7C1}', '{K4Y9}',
+    '{V2P8}', '{R6A3}', '{M1X7}', '{Q5E9}', '{T8H2}', '{B4N6}', '{L7W1}', '{C9J5}',
+    '{F3D8}', '{Y6K4}',
+    '{P2V7}', '{E8R5}', '{H1M9}', '{N4Q6}', '{G7T2}', '{U3Z8}', '{D9L1}', '{X5B4}',
+    '{S8F7}', '{J2C9}', '{K6Y3}', '{V1P5}', '{R9A8}', '{M3X2}', '{Q7E4}', '{T5H1}',
+    '{B8N9}', '{L2W6}', '{C4J7}', '{F1D3}', '{Y8K5}', '{P6V4}', '{E2R7}', '{H9M1}',
+    '{N5Q8}', '{G3T6}',
+    '{U7Z2}', '{D4L9}', '{X1B6}', '{S5F8}', '{J9C3}', '{K2Y7}', '{V4P1}', '{R8A6}',
+    '{M5X9}', '{Q3E2}', '{T1H7}', '{B6N4}', '{L8W5}', '{C2J1}', '{F7D9}', '{Y4K8}',
+    '{P9V3}', '{E5R6}', '{H7M2}', '{N1Q4}', '{G8T9}', '{U6Z5}', '{D3L7}', '{X8B1}',
+    '{S2F9}', '{J5C4}'
+];
+
+// One character per code: 21 specials, 10 digits, 26 lowercase, 26 uppercase.
+const CHARACTERS = [
+    '~', '`', '!', '@', '#', '+', '=', '[', ']', '\\', '{', '}', '|', "'", ':', '"', '.', '/', '<', '>', '?',
+    '1', '2', '3', '4', '5', '6', '7', '8', '9', '0',
+    'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm',
+    'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z',
+    'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M',
+    'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'
+];
+
+if (CODES.length !== CHARACTERS.length) {
+    throw new Error('Codebook mismatch: codes and characters must have equal length');
+}
+
+/** Fisher–Yates shuffle on a copy (original untouched). */
+function fisherYatesShuffle(arr) {
+    const a = arr.slice();
+    for (let i = a.length - 1; i > 0; i--) {
+        const j = crypto.randomInt(i + 1); // cryptographically strong
+        [a[i], a[j]] = [a[j], a[i]];
+    }
+    return a;
+}
+
+/** Builds one random character->code mapping for a single room. */
+function generateRoomMapping() {
+    const shuffled = fisherYatesShuffle(CODES);
+    const mapping = {};
+    for (let i = 0; i < CHARACTERS.length; i++) {
+        mapping[CHARACTERS[i]] = shuffled[i];
+    }
+    return mapping;
+}
 
 // --- Helper Functions ---
 
@@ -47,7 +101,9 @@ app.post('/api/rooms', async (req, res) => {
         const password = generateRoomPassword();
         const passwordHash = await bcrypt.hash(password, 10);
         
-        db.createRoom(code, passwordHash);
+        // Generate the room mapping ONCE at creation and persist it with the room.
+        const mapping = generateRoomMapping();
+        db.createRoom(code, passwordHash, mapping);
         
         res.json({
             room_code: code,
@@ -87,7 +143,10 @@ app.post('/api/rooms/join', async (req, res) => {
         
         db.updateRoomActivity(code);
         
-        res.json({ success: true, room_code: room.code });
+        // The room mapping is ONLY returned after successful authentication.
+        const mapping = db.getRoomMapping(code);
+
+        res.json({ success: true, room_code: room.code, mapping });
     } catch (err) {
         console.error('Join room error:', err);
         res.status(500).json({ error: 'Server error' });
@@ -119,15 +178,13 @@ io.on('connection', (socket) => {
         const roomCode = data.roomCode;
         const username = socket.data.username || 'Anonymous';
         const ciphertext = data.ciphertext;
-        const iv = data.iv;
-        
-        db.saveMessage(roomCode, username, ciphertext, iv);
+
+        db.saveMessage(roomCode, username, ciphertext);
         db.updateRoomActivity(roomCode);
-        
+
         io.to(roomCode).emit('new-message', {
             sender: username,
             ciphertext,
-            iv,
             timestamp: new Date().toISOString()
         });
     });

@@ -1,88 +1,5 @@
-
-let hasLeftRoom = false;
-
-// Web Crypto API Encryption
-
-async function deriveKeyFromPassword(password) {
-    const encoder = new TextEncoder();
-    const keyMaterial = await crypto.subtle.importKey(
-        'raw',
-        encoder.encode(password),
-        'PBKDF2',
-        false,
-        ['deriveKey']
-    );
-
-    return await crypto.subtle.deriveKey(
-        {
-            name: 'PBKDF2',
-            salt: encoder.encode('TempChat2024'),
-            iterations: 100000,
-            hash: 'SHA-256'
-        },
-        keyMaterial,
-        {
-            name: 'AES-GCM',
-            length: 256
-        },
-        false,
-        ['encrypt', 'decrypt']
-    );
-}
-
-
-
-async function encryptMessage(plaintext, password) {
-    const key = await deriveKeyFromPassword(password);
-    const encoder = new TextEncoder();
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-
-    const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv },
-        key,
-        encoder.encode(plaintext)
-    );
-
-    return {
-        ciphertext: arrayBufferToBase64(encrypted),
-        iv: arrayBufferToBase64(iv)
-    };
-}
-
-async function decryptMessage(ciphertext, iv, password) {
-    const key = await deriveKeyFromPassword(password);
-    const decoder = new TextDecoder();
-
-    const encryptedBytes = base64ToArrayBuffer(ciphertext);
-    const ivBytes = base64ToArrayBuffer(iv);
-
-    try {
-        const decrypted = await crypto.subtle.decrypt(
-            { name: 'AES-GCM', iv: ivBytes },
-            key,
-            encryptedBytes
-        );
-        return decoder.decode(decrypted);
-    } catch (e) {
-        return '[Decryption failed — wrong password?]';
-    }
-}
-
-function arrayBufferToBase64(buffer) {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    bytes.forEach(b => binary += String.fromCharCode(b));
-    return btoa(binary);
-}
-
-function base64ToArrayBuffer(base64) {
-    const binary = atob(base64);
-    const bytes = new Uint8Array(binary.length);
-    for (let i = 0; i < binary.length; i++) {
-        bytes[i] = binary.charCodeAt(i);
-    }
-    return bytes;
-}
+// script.js
+// UI + Socket.IO only. All cipher logic lives in encryption.js.
 
 // Socket.IO Connection
 const socket = io();
@@ -106,9 +23,10 @@ function joinRoom() {
         .then(res => res.json())
         .then(data => {
             if (data.success) {
-                // Store in sessionStorage (clears on tab close)
+                // The mapping is delivered ONLY after the server verified code + password
                 sessionStorage.setItem('roomCode', code);
                 sessionStorage.setItem('roomPassword', password);
+                sessionStorage.setItem('roomMapping', JSON.stringify(data.mapping));
                 sessionStorage.setItem('username', username);
                 window.location.href = '/chat.html';
             } else {
@@ -119,6 +37,8 @@ function joinRoom() {
 }
 
 // -- Create Room --
+// The creator joins through the Join Room form with the generated credentials,
+// so they receive the mapping exactly like every other participant.
 function createRoom() {
     fetch('/api/rooms', { method: 'POST' })
         .then(res => res.json())
@@ -140,29 +60,23 @@ function copyCredentials() {
 if (window.location.pathname === '/chat.html') {
     const roomCode = sessionStorage.getItem('roomCode');
     const roomPassword = sessionStorage.getItem('roomPassword');
+    const roomMappingRaw = sessionStorage.getItem('roomMapping');
     const username = sessionStorage.getItem('username');
 
-    document.getElementById("leave-btn").addEventListener("click", leaveRoom);
-
-    function leaveRoom() {
-
-        if (hasLeftRoom) return;
-        hasLeftRoom = true;
-    
-        socket.emit("leave-room", { roomCode });
-    
-        sessionStorage.clear();
-    
-        window.location.href = "/";
-    }
-
-    if (!roomCode || !roomPassword) {
+    if (!roomCode || !roomPassword || !roomMappingRaw) {
         window.location.href = '/';
     }
 
-    document.getElementById('room-display').textContent = roomCode;
-    document.getElementById('password-display').textContent = roomPassword;
-    document.getElementById('user-display').textContent = username;
+    // Initialize this room's cipher BEFORE any message is sent or received
+    try {
+        setRoomMapping(JSON.parse(roomMappingRaw));
+    } catch (e) {
+        alert('Room mapping is missing or invalid — please join again.');
+        window.location.href = '/';
+    }
+
+    document.getElementById('room-display').textContent = `Room: ${roomCode}`;
+    document.getElementById('user-display').textContent = `Logged in as: ${username}`;
 
     // Join socket room
     socket.emit('join-room', { roomCode, username });
@@ -173,23 +87,20 @@ if (window.location.pathname === '/chat.html') {
         if (e.key === 'Enter') sendMessage();
     });
 
-    async function sendMessage() {
+    function sendMessage() {
         const input = document.getElementById('message-input');
         const plaintext = input.value.trim();
-
         if (!plaintext) return;
 
-        const { ciphertext, iv } = await encryptMessage(plaintext, roomPassword);
-
-        socket.emit('send-message', { roomCode, ciphertext, iv });
+        const ciphertext = encryptMessage(plaintext);   // sync, room-specific
+        socket.emit('send-message', { roomCode, ciphertext });
 
         input.value = '';
     }
 
     // Receive message
-    socket.on('new-message', async (data) => {
-        const plaintext = await decryptMessage(data.ciphertext, data.iv, roomPassword);
-
+    socket.on('new-message', (data) => {
+        const plaintext = decryptMessage(data.ciphertext); // sync, room-specific
         displayMessage(
             data.sender,
             plaintext,
@@ -202,12 +113,18 @@ if (window.location.pathname === '/chat.html') {
         const div = document.createElement('div');
         div.className = `message ${isOwn ? 'own' : 'other'}`;
         div.innerHTML = `
-            <strong>${sender}</strong>
-            <p>${text}</p>
+            <strong>${escapeHtml(sender)}</strong>
+            <p>${escapeHtml(text)}</p>
             <small>${new Date().toLocaleTimeString()}</small>
         `;
         container.appendChild(div);
         container.scrollTop = container.scrollHeight;
+    }
+
+    function escapeHtml(s) {
+        return String(s).replace(/[&<>"']/g, (c) => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        }[c]));
     }
 
     // User joined/left notifications
@@ -246,11 +163,7 @@ if (window.location.pathname === '/chat.html') {
     }
 
     // Handle page close
-    window.addEventListener("beforeunload", () => {
-
-        if (!hasLeftRoom) {
-            socket.emit("leave-room", { roomCode });
-        }
-    
+    window.addEventListener('beforeunload', () => {
+        socket.emit('leave-room', { roomCode });
     });
 }

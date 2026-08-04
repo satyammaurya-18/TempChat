@@ -2,7 +2,7 @@ const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, 'tempchat.db');
+const DB_PATH = path.join(__dirname, 'ciphervault.db');
 let db = null;
 
 async function initDB() {
@@ -19,6 +19,7 @@ async function initDB() {
         CREATE TABLE IF NOT EXISTS rooms (
             code TEXT PRIMARY KEY,
             password_hash TEXT NOT NULL,
+            mapping TEXT NOT NULL DEFAULT '{}',
             created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
             last_active DATETIME DEFAULT CURRENT_TIMESTAMP,
             is_active INTEGER DEFAULT 1
@@ -48,6 +49,12 @@ async function initDB() {
         )
     `);
     
+    const columns = getAllRows('PRAGMA table_info(rooms)');
+    if (!columns.some((c) => c.name === 'mapping')) {
+        db.run("ALTER TABLE rooms ADD COLUMN mapping TEXT NOT NULL DEFAULT '{}'");
+        console.log('Added mapping column to rooms table');
+    }
+
     saveDB();
     console.log('Database initialized');
 }
@@ -89,12 +96,26 @@ function runQuery(sql, params = []) {
     saveDB();
 }
 
-function createRoom(code, hash) {
-    runQuery('INSERT INTO rooms (code, password_hash) VALUES (?, ?)', [code, hash]);
+function createRoom(code, hash, mapping) {
+    runQuery(
+        'INSERT INTO rooms (code, password_hash, mapping) VALUES (?, ?, ?)',
+        [code, hash, JSON.stringify(mapping)]
+    );
 }
 
 function getRoom(code) {
     return getFirstRow('SELECT * FROM rooms WHERE code = ?', [code]);
+}
+
+/** Returns the room's encryption mapping as a parsed object, or null. */
+function getRoomMapping(code) {
+    const row = getFirstRow('SELECT mapping FROM rooms WHERE code = ?', [code]);
+    if (!row) return null;
+    try {
+        return JSON.parse(row.mapping || '{}');
+    } catch (e) {
+        return {};
+    }
 }
 
 function roomExists(code) {
@@ -122,8 +143,11 @@ function getRoomUsers(code) {
     return getAllRows('SELECT DISTINCT username, socket_id FROM room_users WHERE room_code = ?', [code]);
 }
 
-function saveMessage(code, sender, ciphertext, iv) {
-    runQuery('INSERT INTO messages (room_code, sender_name, ciphertext, iv) VALUES (?, ?, ?, ?)', [code, sender, ciphertext, iv]);
+function saveMessage(code, sender, ciphertext) {
+    runQuery(
+        'INSERT INTO messages (room_code, sender_name, ciphertext, iv) VALUES (?, ?, ?, ?)',
+        [code, sender, ciphertext, '']
+    );
 }
 
 function cleanupRooms(threshold) {
@@ -134,6 +158,7 @@ module.exports = {
     initDB,
     createRoom,
     getRoom,
+    getRoomMapping,
     roomExists,
     updateRoomActivity,
     deactivateRoom,
